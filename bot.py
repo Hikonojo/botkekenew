@@ -2,10 +2,8 @@ import asyncio
 import time
 from datetime import date
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
-from aiohttp import web
+from aiogram.types import ChatPermissions
 import os
-import random
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -23,16 +21,13 @@ butilka_cooldowns = {}        # user_id : last_use_time для /butilka
 antibutilka_cooldowns = {}    # user_id : last_use_time для /antibutilka
 butilka_daily = {}            # user_id : {'date': 'YYYY-MM-DD', 'count': n}
 
-# Активные дуэли
-active_duels = {}  # duel_id : (challenger_id, target_id, chat_id)
-
-# -------------------- BUTILKA --------------------
 @dp.message_handler(commands=["butilka"])
 async def butilka(message: types.Message):
     user_id = message.from_user.id
     now = time.time()
     chat_id = message.chat.id
 
+    # дневной лимит (3 в день)
     today = date.today().isoformat()
     info = butilka_daily.get(user_id)
     if info is None or info.get("date") != today:
@@ -42,21 +37,24 @@ async def butilka(message: types.Message):
         await message.reply("Ты уже использовал 3/3 сегодня. Завтра попробуй снова.")
         return
 
+    # проверка кулдауна (час)
     if user_id in butilka_cooldowns and now - butilka_cooldowns[user_id] < COOLDOWN:
         remaining = int((COOLDOWN - (now - butilka_cooldowns[user_id])) / 60)
         await message.reply(f"Кулдаун, терпила. Жди ещё {remaining} мин.")
         return
 
+    # проверяем, админ ли цель
     try:
         member = await bot.get_chat_member(chat_id, TARGET_ID)
     except Exception as e:
         await message.reply(f"Не могу получить информацию о пользователе: {e}")
         return
 
-    if member.status in ["administrator", "creator"]:
+    if member.is_chat_admin():
         await message.reply("Эй, @BUNKERKlNG слишком крут для бутылки, он админ 😎")
         return
 
+    # всё ок — увеличиваем счётчик и ставим кулдаун
     butilka_daily[user_id]["count"] += 1
     butilka_cooldowns[user_id] = now
     used = butilka_daily[user_id]["count"]
@@ -64,6 +62,7 @@ async def butilka(message: types.Message):
     until_date = int(time.time()) + MUTE_TIME
 
     try:
+        # мутим цель
         await bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=TARGET_ID,
@@ -71,46 +70,50 @@ async def butilka(message: types.Message):
             until_date=until_date
         )
 
+        # первое сообщение с таймером и счётчиком использования
         timer_msg = await message.reply(f"@BUNKERKlNG отправлен в бутылку на 5 минут 🍼 ({used}/3)\nОсталось: 5:00 🕒")
 
-        async def timer():
-            remaining = MUTE_TIME
-            interval = 5
-            while remaining > 0:
-                minutes, seconds = divmod(int(remaining), 60)
-                await timer_msg.edit_text(f"@BUNKERKlNG в бутылке 🍼 ({used}/3)\nОсталось: {minutes}:{seconds:02d} 🕒")
-                await asyncio.sleep(interval)
-                remaining -= interval
-            await timer_msg.edit_text(f"@BUNKERKlNG свободен, бутылка опустела 🎉")
+        # таймер обновляем каждые 5 секунд
+        interval = 5
+        remaining = MUTE_TIME
+        while remaining > 0:
+            minutes, seconds = divmod(int(remaining), 60)
+            await timer_msg.edit_text(f"@BUNKERKlNG в бутылке 🍼 ({used}/3)\nОсталось: {minutes}:{seconds:02d} 🕒")
+            await asyncio.sleep(interval)
+            remaining -= interval
+            if remaining < 0:
+                remaining = 0
 
-        asyncio.create_task(timer())
+        await timer_msg.edit_text(f"@BUNKERKlNG свободен, бутылка опустела 🎉")
 
     except Exception as e:
-        await message.reply(f"Бот не админ или не может мутить. Ошибка: {e}")
+        await message.reply(f"Бот не админ или не может мутить. Я не бог, блин.\nОшибка: {e}")
 
-# -------------------- ANTIBUTILKA --------------------
 @dp.message_handler(commands=["antibutilka"])
 async def antibutilka(message: types.Message):
     user_id = message.from_user.id
     now = time.time()
     chat_id = message.chat.id
 
+    # проверка кулдауна для /antibutilka
     if user_id in antibutilka_cooldowns and now - antibutilka_cooldowns[user_id] < COOLDOWN:
         remaining = int((COOLDOWN - (now - antibutilka_cooldowns[user_id])) / 60)
         await message.reply(f"Кулдаун для /antibutilka. Жди ещё {remaining} мин.")
         return
 
+    # получим статус цели (чтобы, например, не пытаться "освободить" админа)
     try:
         member = await bot.get_chat_member(chat_id, TARGET_ID)
     except Exception as e:
         await message.reply(f"Не могу получить информацию о пользователе: {e}")
         return
 
-    if member.status in ["administrator", "creator"]:
+    if member.is_chat_admin():
         await message.reply("Он и так админ — проблем нет.")
         return
 
     try:
+        # Снимаем ограничения (разрешаем отправлять сообщения и пр.)
         await bot.restrict_chat_member(
             chat_id=chat_id,
             user_id=TARGET_ID,
@@ -126,103 +129,7 @@ async def antibutilka(message: types.Message):
         antibutilka_cooldowns[user_id] = now
         await message.reply(f"@BUNKERKlNG освобождён из бутылки 🎈")
     except Exception as e:
-        await message.reply(f"Не могу снять мут. Ошибка: {e}")
-
-# -------------------- DUEL --------------------
-@dp.message_handler(commands=["duel"])
-async def duel(message: types.Message):
-    if not message.reply_to_message:
-        await message.reply("Ответь на сообщение человека, которого хочешь вызвать на дуэль.")
-        return
-
-    challenger = message.from_user
-    target = message.reply_to_message.from_user
-
-    if challenger.id == target.id:
-        await message.reply("Сам с собой дуэль? Шизофрения, конечно, мощная.")
-        return
-
-    if target.is_bot:
-        await message.reply("Ботов на дуэль не вызывают.")
-        return
-
-    duel_id = str(time.time())
-    active_duels[duel_id] = (challenger.id, target.id, message.chat.id)
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("⚔️ Принять", callback_data=f"duel_accept:{duel_id}"),
-        InlineKeyboardButton("🏃 Отказаться", callback_data=f"duel_decline:{duel_id}")
-    )
-
-    await message.reply(f"{target.first_name}, тебя вызывает на дуэль {challenger.first_name} ⚔️", reply_markup=kb)
-
-@dp.callback_query_handler(lambda c: c.data.startswith("duel_"))
-async def duel_buttons(callback: types.CallbackQuery):
-    action, duel_id = callback.data.split(":")
-    if duel_id not in active_duels:
-        await callback.answer("Эта дуэль уже закончилась.")
-        return
-
-    challenger_id, target_id, chat_id = active_duels[duel_id]
-
-    if callback.from_user.id != target_id:
-        await callback.answer("Это не твоя дуэль.")
-        return
-
-    if action == "duel_decline":
-        await callback.message.edit_text(f"{callback.from_user.first_name} трусливо избежал дуэли 🏃")
-        del active_duels[duel_id]
-        return
-
-    if action == "duel_accept":
-        loser = random.choice([challenger_id, target_id])
-        loser_name = "Вызывающий" if loser == challenger_id else "Принявший"
-        until_date = int(time.time()) + MUTE_TIME
-
-        try:
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=loser,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=until_date
-            )
-
-            text = f"{loser_name} проиграл дуэль и отправляется в бутылку на 5 минут 🍼\nОсталось: 5:00 🕒"
-            timer_msg = await callback.message.edit_text(text)
-
-            async def duel_timer():
-                remaining = MUTE_TIME
-                interval = 5
-                while remaining > 0:
-                    minutes, seconds = divmod(int(remaining), 60)
-                    await timer_msg.edit_text(f"{loser_name} в бутылке 🍼\nОсталось: {minutes}:{seconds:02d} 🕒")
-                    await asyncio.sleep(interval)
-                    remaining -= interval
-                await timer_msg.edit_text(f"{loser_name} свободен, бутылка опустела 🎉")
-
-            asyncio.create_task(duel_timer())
-
-        except Exception as e:
-            await callback.message.edit_text(f"Не смог замутить. Ошибка: {e}")
-
-        del active_duels[duel_id]
-
-# -------------------- WEBHOOK --------------------
-WEBHOOK_HOST = os.getenv("RAILWAY_STATIC_URL") or "https://yourapp.up.railway.app"
-WEBHOOK_PATH = f"/webhook/{TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-
-async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
-
-async def on_shutdown(app):
-    await bot.delete_webhook()
-
-app = web.Application()
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
-app.router.add_post(WEBHOOK_PATH, dp)
+        await message.reply(f"Не могу снять мут. Я снова не бог.\nОшибка: {e}")
 
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    asyncio.run(dp.start_polling())
