@@ -3,6 +3,7 @@ import time
 from datetime import date
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
+from aiohttp import web
 import os
 import random
 
@@ -32,7 +33,6 @@ async def butilka(message: types.Message):
     now = time.time()
     chat_id = message.chat.id
 
-    # дневной лимит (3 в день)
     today = date.today().isoformat()
     info = butilka_daily.get(user_id)
     if info is None or info.get("date") != today:
@@ -42,7 +42,6 @@ async def butilka(message: types.Message):
         await message.reply("Ты уже использовал 3/3 сегодня. Завтра попробуй снова.")
         return
 
-    # проверка кулдауна (час)
     if user_id in butilka_cooldowns and now - butilka_cooldowns[user_id] < COOLDOWN:
         remaining = int((COOLDOWN - (now - butilka_cooldowns[user_id])) / 60)
         await message.reply(f"Кулдаун, терпила. Жди ещё {remaining} мин.")
@@ -54,11 +53,10 @@ async def butilka(message: types.Message):
         await message.reply(f"Не могу получить информацию о пользователе: {e}")
         return
 
-    if member.is_chat_admin():
+    if member.status in ["administrator", "creator"]:
         await message.reply("Эй, @BUNKERKlNG слишком крут для бутылки, он админ 😎")
         return
 
-    # увеличиваем счётчик и ставим кулдаун
     butilka_daily[user_id]["count"] += 1
     butilka_cooldowns[user_id] = now
     used = butilka_daily[user_id]["count"]
@@ -75,20 +73,20 @@ async def butilka(message: types.Message):
 
         timer_msg = await message.reply(f"@BUNKERKlNG отправлен в бутылку на 5 минут 🍼 ({used}/3)\nОсталось: 5:00 🕒")
 
-        interval = 5
-        remaining = MUTE_TIME
-        while remaining > 0:
-            minutes, seconds = divmod(int(remaining), 60)
-            await timer_msg.edit_text(f"@BUNKERKlNG в бутылке 🍼 ({used}/3)\nОсталось: {minutes}:{seconds:02d} 🕒")
-            await asyncio.sleep(interval)
-            remaining -= interval
-            if remaining < 0:
-                remaining = 0
+        async def timer():
+            remaining = MUTE_TIME
+            interval = 5
+            while remaining > 0:
+                minutes, seconds = divmod(int(remaining), 60)
+                await timer_msg.edit_text(f"@BUNKERKlNG в бутылке 🍼 ({used}/3)\nОсталось: {minutes}:{seconds:02d} 🕒")
+                await asyncio.sleep(interval)
+                remaining -= interval
+            await timer_msg.edit_text(f"@BUNKERKlNG свободен, бутылка опустела 🎉")
 
-        await timer_msg.edit_text(f"@BUNKERKlNG свободен, бутылка опустела 🎉")
+        asyncio.create_task(timer())
 
     except Exception as e:
-        await message.reply(f"Бот не админ или не может мутить. Я не бог, блин.\nОшибка: {e}")
+        await message.reply(f"Бот не админ или не может мутить. Ошибка: {e}")
 
 # -------------------- ANTIBUTILKA --------------------
 @dp.message_handler(commands=["antibutilka"])
@@ -108,7 +106,7 @@ async def antibutilka(message: types.Message):
         await message.reply(f"Не могу получить информацию о пользователе: {e}")
         return
 
-    if member.is_chat_admin():
+    if member.status in ["administrator", "creator"]:
         await message.reply("Он и так админ — проблем нет.")
         return
 
@@ -128,12 +126,11 @@ async def antibutilka(message: types.Message):
         antibutilka_cooldowns[user_id] = now
         await message.reply(f"@BUNKERKlNG освобождён из бутылки 🎈")
     except Exception as e:
-        await message.reply(f"Не могу снять мут. Я снова не бог.\nОшибка: {e}")
+        await message.reply(f"Не могу снять мут. Ошибка: {e}")
 
 # -------------------- DUEL --------------------
 @dp.message_handler(commands=["duel"])
 async def duel(message: types.Message):
-
     if not message.reply_to_message:
         await message.reply("Ответь на сообщение человека, которого хочешь вызвать на дуэль.")
         return
@@ -158,16 +155,11 @@ async def duel(message: types.Message):
         InlineKeyboardButton("🏃 Отказаться", callback_data=f"duel_decline:{duel_id}")
     )
 
-    await message.reply(
-        f"{target.first_name}, тебя вызывает на дуэль {challenger.first_name} ⚔️",
-        reply_markup=kb
-    )
+    await message.reply(f"{target.first_name}, тебя вызывает на дуэль {challenger.first_name} ⚔️", reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("duel_"))
 async def duel_buttons(callback: types.CallbackQuery):
-
     action, duel_id = callback.data.split(":")
-
     if duel_id not in active_duels:
         await callback.answer("Эта дуэль уже закончилась.")
         return
@@ -179,9 +171,7 @@ async def duel_buttons(callback: types.CallbackQuery):
         return
 
     if action == "duel_decline":
-        await callback.message.edit_text(
-            f"{callback.from_user.first_name} трусливо избежал дуэли 🏃"
-        )
+        await callback.message.edit_text(f"{callback.from_user.first_name} трусливо избежал дуэли 🏃")
         del active_duels[duel_id]
         return
 
@@ -201,24 +191,38 @@ async def duel_buttons(callback: types.CallbackQuery):
             text = f"{loser_name} проиграл дуэль и отправляется в бутылку на 5 минут 🍼\nОсталось: 5:00 🕒"
             timer_msg = await callback.message.edit_text(text)
 
-            # Таймер обновления каждые 5 секунд
-            interval = 5
-            remaining = MUTE_TIME
-            while remaining > 0:
-                minutes, seconds = divmod(int(remaining), 60)
-                await timer_msg.edit_text(f"{loser_name} в бутылке 🍼\nОсталось: {minutes}:{seconds:02d} 🕒")
-                await asyncio.sleep(interval)
-                remaining -= interval
-                if remaining < 0:
-                    remaining = 0
+            async def duel_timer():
+                remaining = MUTE_TIME
+                interval = 5
+                while remaining > 0:
+                    minutes, seconds = divmod(int(remaining), 60)
+                    await timer_msg.edit_text(f"{loser_name} в бутылке 🍼\nОсталось: {minutes}:{seconds:02d} 🕒")
+                    await asyncio.sleep(interval)
+                    remaining -= interval
+                await timer_msg.edit_text(f"{loser_name} свободен, бутылка опустела 🎉")
 
-            await timer_msg.edit_text(f"{loser_name} свободен, бутылка опустела 🎉")
+            asyncio.create_task(duel_timer())
 
         except Exception as e:
             await callback.message.edit_text(f"Не смог замутить. Ошибка: {e}")
 
         del active_duels[duel_id]
 
-# -------------------- RUN --------------------
+# -------------------- WEBHOOK --------------------
+WEBHOOK_HOST = os.getenv("RAILWAY_STATIC_URL") or "https://yourapp.up.railway.app"
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+async def on_startup(app):
+    await bot.set_webhook(WEBHOOK_URL)
+
+async def on_shutdown(app):
+    await bot.delete_webhook()
+
+app = web.Application()
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
+app.router.add_post(WEBHOOK_PATH, dp)
+
 if __name__ == "__main__":
-    asyncio.run(dp.start_polling())
+    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
