@@ -134,6 +134,7 @@ async def antibutilka(message: types.Message):
         await message.reply(f"Не могу снять мут. Ошибка: {e}")
 
 # -------------------- DUEL --------------------
+print(message.from_user.id, message.reply_to_message)
 @dp.message_handler(commands=["duel"])
 async def duel(message: types.Message):
     if not message.reply_to_message:
